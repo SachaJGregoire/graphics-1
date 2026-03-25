@@ -37,6 +37,10 @@ public:
 		data[1] /= n;
 		data[2] /= n;
 	}
+	Vector normalized() {
+		this->normalize();
+		return *this;
+	}
 	double operator[](int i) const { return data[i]; };
 	double& operator[](int i) { return data[i]; };
 	double data[3];
@@ -89,7 +93,25 @@ public:
 	// t>=0 the distance between the ray origin and P (i.e., the parameter along the ray)
 	// and the unit normal N
 	bool intersect(const Ray& ray, Vector& P, double &t, Vector& N) const {
-		 // TODO (lab 1) : compute the intersection (just true/false at the begining of lab 1, then P, t and N as well)
+		// TODO (lab 1) : compute the intersection (just true/false at the begining of lab 1, then P, t and N as well)
+		double delta = sqr(dot(ray.u, ray.O - C)) - ((ray.O - C).norm2() - sqr(R));
+		if (delta < 0) return false;
+		double base = dot(ray.u, C - ray.O);
+		double sqrtdelta = sqrt(delta);
+		double t1 = base - sqrtdelta;
+		if (t1 >= 0) {
+			t = t1;
+			P = ray.O + ray.u * t;
+			N = (P - C).normalized();
+			return true;
+		}
+		double t2 = base + sqrtdelta;
+		if (t2 >= 0) {
+			t = t2;
+			P = ray.O + ray.u * t;
+			N = (P - C).normalized();
+			return true;
+		}
 		return false;
 	}
 
@@ -123,11 +145,24 @@ public:
     // and the unit normal N. 
 	// Also returns the index of the object within the std::vector objects in object_id
 	bool intersect(const Ray& ray, Vector& P, double& t, Vector& N, int &object_id) const  {
-
 		// TODO (lab 1): iterate through the objects and check the intersections with all of them, 
 		// and keep the closest intersection, i.e., the one if smallest positive value of t
-
-		return false;
+		// NOTE: Use -1 as default value. Maybe not a good idea. Oh well.
+		t = std::numeric_limits<double>::max();
+		Vector P_temp;
+		double t_temp;
+		Vector N_temp;
+		for (int i = 0; i < objects.size(); i++) {
+			if (objects[i]->intersect(ray, P_temp, t_temp, N_temp)) {
+				if (t_temp < t) {
+					P = P_temp;
+					t = t_temp;
+					N = N_temp;
+					object_id = i;
+				}
+			}
+		}
+		return (t != -1);
 	}
 
 
@@ -143,21 +178,40 @@ public:
 		double t;
 		int object_id;
 		if (intersect(ray, P, t, N, object_id)) {
-
+			double epsilon = 0.00000000001;
+			P = P + epsilon * N;
 			if (objects[object_id]->mirror) {
-
 				// return getColor in the reflected direction, with recursion_depth+1 (recursively)
+				Vector reflected_ray = (ray.u - 2 * dot(ray.u, N) * N).normalized();
+				return getColor(Ray(P, reflected_ray), recursion_depth + 1);
 			} // else
 
 			if (objects[object_id]->transparent) { // optional
-
 				// return getColor in the refraction direction, with recursion_depth+1 (recursively)
+				double n1 = 1.003;
+				double n2 = 1.330;
+				Vector tTT = n1 / n2 * (ray.u - dot(ray.u, N) * N);
+				double tN  = -sqrt(1 - sqr(n1/n2) * (1 - sqr(dot(ray.u, N))));
+				Vector refracted_ray = (tTT + tN * N).normalized();
+				return getColor(Ray(P, refracted_ray), recursion_depth + 1);
 			} // else
 
 			// test if there is a shadow by sending a new ray
 			// if there is no shadow, compute the formula with dot products etc.
+			Vector P_temp = P;
+			double t_temp = t;
+			Vector N_temp = N;
+			int object_id_temp = object_id;
+			Vector shadow_ray = (light_position - P).normalized();
+			if (intersect(Ray(P, shadow_ray), P_temp, t_temp, N_temp, object_id_temp)) {
+				if ((P_temp - P).norm2() <= (light_position - P).norm2()) return Vector(0, 0, 0);
+			}
 
-
+			double attenuation 	= light_intensity / (4 * M_PI * (light_position - P).norm2());
+			Vector material 	= objects[object_id]->albedo / M_PI;
+			double solid_angle	= dot(N, (light_position - P).normalized());
+			if (solid_angle < 0) solid_angle = 0;
+			return attenuation * material * solid_angle;
 			// TODO (lab 2) : add indirect lighting component with a recursive call
 		}
 
@@ -183,6 +237,7 @@ int main() {
 	}
 
 	Sphere center_sphere(Vector(0, 0, 0), 10., Vector(0.8, 0.8, 0.8));
+	center_sphere.mirror = false;
 	Sphere wall_left(Vector(-1000, 0, 0), 940, Vector(0.5, 0.8, 0.1));
 	Sphere wall_right(Vector(1000, 0, 0), 940, Vector(0.9, 0.2, 0.3));
 	Sphere wall_front(Vector(0, 0, -1000), 940, Vector(0.1, 0.6, 0.7));
@@ -191,33 +246,33 @@ int main() {
 	Sphere floor(Vector(0, -1000, 0), 990, Vector(0.6, 0.5, 0.7));
 
 	Scene scene;
-	scene.camera_center = Vector(0, 0, 0);
+	scene.camera_center = Vector(0, 0, 55);
 	scene.light_position = Vector(-10,20,40);
 	scene.light_intensity = 3E7;
 	scene.fov = 60 * M_PI / 180.;
-	scene.gamma = 1.0;    // TODO (lab 1) : play with gamma ; typically, gamma = 2.2
+	scene.gamma = 2.2;    // TODO (lab 1) : play with gamma ; typically, gamma = 2.2
 	scene.max_light_bounce = 5;
 
 	scene.addObject(&center_sphere);
 
-	/*
 	scene.addObject(&wall_left);
 	scene.addObject(&wall_right);
 	scene.addObject(&wall_front);
 	scene.addObject(&wall_behind);
 	scene.addObject(&ceiling);
 	scene.addObject(&floor);
-	*/
 
 	std::vector<unsigned char> image(W * H * 3, 0);
 
 #pragma omp parallel for schedule(dynamic, 1)
+	double z = -W/(2*tan(scene.fov/2));
 	for (int i = 0; i < H; i++) {
 		for (int j = 0; j < W; j++) {
 			Vector color;
 
 			// TODO (lab 1) : correct ray_direction so that it goes through each pixel (j, i)			
-			Vector ray_direction(0., 0., -1);
+			Vector ray_direction(j - W/2 + 0.5, H/2 - i - 0.5, z);
+			ray_direction.normalize();
 
 			Ray ray(scene.camera_center, ray_direction);
 
