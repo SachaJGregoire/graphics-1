@@ -93,7 +93,7 @@ public:
 	// t>=0 the distance between the ray origin and P (i.e., the parameter along the ray)
 	// and the unit normal N
 	bool intersect(const Ray& ray, Vector& P, double &t, Vector& N) const {
-		// TODO (lab 1) : compute the intersection (just true/false at the begining of lab 1, then P, t and N as well)
+		// DONE (lab 1) : compute the intersection (just true/false at the begining of lab 1, then P, t and N as well)
 		double delta = sqr(dot(ray.u, ray.O - C)) - ((ray.O - C).norm2() - sqr(R));
 		if (delta < 0) return false;
 		double base = dot(ray.u, C - ray.O);
@@ -145,9 +145,8 @@ public:
     // and the unit normal N. 
 	// Also returns the index of the object within the std::vector objects in object_id
 	bool intersect(const Ray& ray, Vector& P, double& t, Vector& N, int &object_id) const  {
-		// TODO (lab 1): iterate through the objects and check the intersections with all of them, 
+		// DONE (lab 1): iterate through the objects and check the intersections with all of them, 
 		// and keep the closest intersection, i.e., the one if smallest positive value of t
-		// NOTE: Use -1 as default value. Maybe not a good idea. Oh well.
 		t = std::numeric_limits<double>::max();
 		Vector P_temp;
 		double t_temp;
