@@ -2,6 +2,8 @@
 #include <vector>
 #include <cmath>
 #include <random>
+#include <omp.h>
+#include <iostream>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -51,6 +53,9 @@ Vector operator+(const Vector& a, const Vector& b) {
 }
 Vector operator-(const Vector& a, const Vector& b) {
 	return Vector(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+}
+Vector operator*(const Vector& a, const Vector& b) {
+	return Vector(a[0] * b[0], a[1] * b[1], a[2] * b[2]);
 }
 Vector operator*(const double a, const Vector& b) {
 	return Vector(a*b[0], a*b[1], a*b[2]);
@@ -161,7 +166,7 @@ public:
 				}
 			}
 		}
-		return (t != -1);
+		return (t != std::numeric_limits<double>::max());
 	}
 
 
@@ -170,7 +175,7 @@ public:
 
 		if (recursion_depth >= max_light_bounce) return Vector(0, 0, 0);
 
-		// TODO (lab 1) : if intersect with ray, use the returned information to compute the color ; otherwise black 
+		// DONE (lab 1) : if intersect with ray, use the returned information to compute the color ; otherwise black 
 		// in lab 1, the color only includes direct lighting with shadows
 
 		Vector P, N;
@@ -185,7 +190,7 @@ public:
 				return getColor(Ray(P, reflected_ray), recursion_depth + 1);
 			} // else
 
-			if (objects[object_id]->transparent) { // optional
+			if (objects[object_id]->transparent) { // TODO: fix (optional)
 				// return getColor in the refraction direction, with recursion_depth+1 (recursively)
 				double n1 = 1.003;
 				double n2 = 1.330;
@@ -210,8 +215,29 @@ public:
 			Vector material 	= objects[object_id]->albedo / M_PI;
 			double solid_angle	= dot(N, (light_position - P).normalized());
 			if (solid_angle < 0) solid_angle = 0;
-			return attenuation * material * solid_angle;
+			Vector direct = attenuation * material * solid_angle;
+
 			// TODO (lab 2) : add indirect lighting component with a recursive call
+			int tid = omp_get_thread_num();
+			double r1 = uniform(engine[tid]);
+			double r2 = uniform(engine[tid]);
+			double x = cos(2.0 * M_PI * r1) * sqrt(1 - r2);
+			double y = sin(2.0 * M_PI * r1) * sqrt(1 - r2);
+			double z = sqrt(r2);
+
+			Vector T1;
+			double min_val = std::min(std::min(abs(N[0]), abs(N[1])), abs(N[2]));
+			if 		(min_val == abs(N[0])) { T1 = Vector(0, -N[2], N[1]); }
+			else if (min_val == abs(N[1])) { T1 = Vector(N[2], 0, -N[0]); }
+			else if (min_val == abs(N[2])) { T1 = Vector(-N[1], N[0], 0); }
+
+			T1.normalize();
+			Vector T2 = cross(N, T1);
+			Vector wi = x * T1 + y * T2 + z * N;
+			Ray indirect_ray(P, wi);
+			Vector indirect = objects[object_id]->albedo * getColor(indirect_ray, recursion_depth + 1);
+
+			return direct + indirect;
 		}
 
 		
@@ -236,7 +262,7 @@ int main() {
 	}
 
 	Sphere center_sphere(Vector(0, 0, 0), 10., Vector(0.8, 0.8, 0.8));
-	center_sphere.mirror = false;
+	center_sphere.transparent = false;
 	Sphere wall_left(Vector(-1000, 0, 0), 940, Vector(0.5, 0.8, 0.1));
 	Sphere wall_right(Vector(1000, 0, 0), 940, Vector(0.9, 0.2, 0.3));
 	Sphere wall_front(Vector(0, 0, -1000), 940, Vector(0.1, 0.6, 0.7));
@@ -249,7 +275,7 @@ int main() {
 	scene.light_position = Vector(-10,20,40);
 	scene.light_intensity = 3E7;
 	scene.fov = 60 * M_PI / 180.;
-	scene.gamma = 2.2;    // TODO (lab 1) : play with gamma ; typically, gamma = 2.2
+	scene.gamma = 2.2;    // DONE (lab 1) : play with gamma ; typically, gamma = 2.2
 	scene.max_light_bounce = 5;
 
 	scene.addObject(&center_sphere);
@@ -263,13 +289,13 @@ int main() {
 
 	std::vector<unsigned char> image(W * H * 3, 0);
 
-#pragma omp parallel for schedule(dynamic, 1)
 	double z = -W/(2*tan(scene.fov/2));
+	#pragma omp parallel for schedule(dynamic, 1)
 	for (int i = 0; i < H; i++) {
 		for (int j = 0; j < W; j++) {
-			Vector color;
+			Vector color(0, 0, 0);
 
-			// TODO (lab 1) : correct ray_direction so that it goes through each pixel (j, i)			
+			// DONE (lab 1) : correct ray_direction so that it goes through each pixel (j, i)
 			Vector ray_direction(j - W/2 + 0.5, H/2 - i - 0.5, z);
 			ray_direction.normalize();
 
@@ -277,9 +303,23 @@ int main() {
 
 			// TODO (lab 2) : add Monte Carlo / averaging of random ray contributions here
 			// TODO (lab 2) : add antialiasing by altering the ray_direction here
-			// TODO (lab 2) : add depth of field effect by altering the ray origin (and direction) here
+			int num_rays = 10;
+			double sigma = 0.5;
+			int tid = omp_get_thread_num();
+			for (int k = 0; k < num_rays; k++) {
+				double r1 = uniform(engine[tid]);
+				double r2 = uniform(engine[tid]);
+				double x = j - W/2 + 0.5 + sigma * sqrt(-2.0 * log(r1)) * cos(2.0 * M_PI * r2);
+				double y = H/2 - i - 0.5 + sigma * sqrt(-2.0 * log(r1)) * sin(2.0 * M_PI * r2);
+				Vector new_direction(x, y, z);
+				new_direction.normalize();
+				Ray new_ray(scene.camera_center, new_direction);
+				color = color + scene.getColor(new_ray, 0);
+			}
+			color = color / num_rays;
 
-			color  = scene.getColor(ray, 0);
+			// TODO (lab 2) : add depth of field effect by altering the ray origin (and direction) here (optional)
+
 
 			image[(i * W + j) * 3 + 0] = std::min(255., std::max(0., 255. * std::pow(color[0] / 255., 1. / scene.gamma)));
 			image[(i * W + j) * 3 + 1] = std::min(255., std::max(0., 255. * std::pow(color[1] / 255., 1. / scene.gamma)));
