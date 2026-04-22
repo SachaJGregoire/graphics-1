@@ -3,6 +3,9 @@
 #include <cmath>
 #include <random>
 #include <omp.h>
+#include <map>
+#include <string>
+#include <fstream>
 #include <iostream>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -40,8 +43,8 @@ public:
 		data[2] /= n;
 	}
 	Vector normalized() {
-		this->normalize();
-		return *this;
+		double n = norm();
+    	return Vector(data[0]/n, data[1]/n, data[2]/n);
 	}
 	double operator[](int i) const { return data[i]; };
 	double& operator[](int i) { return data[i]; };
@@ -125,15 +128,225 @@ public:
 };
 
 
-// I will provide you with an obj mesh loader (labs 3 and 4)
+// Class only used in labs 3 and 4 
+class TriangleIndices {
+public:
+	TriangleIndices(int vtxi = -1, int vtxj = -1, int vtxk = -1, int ni = -1, int nj = -1, int nk = -1, int uvi = -1, int uvj = -1, int uvk = -1, int group = -1) {
+		vtx[0] = vtxi; vtx[1] = vtxj; vtx[2] = vtxk;
+		uv[0] = uvi; uv[1] = uvj; uv[2] = uvk;
+		n[0] = ni; n[1] = nj; n[2] = nk;
+		this->group = group;
+	};
+	int vtx[3]; // indices within the vertex coordinates array
+	int uv[3];  // indices within the uv coordinates array
+	int n[3];   // indices within the normals array
+	int group;  // face group
+};
+
+// Class only used in labs 3 and 4
+class BoundingBox {
+public:
+	BoundingBox() {
+		Bmin = Vector(std::numeric_limits<double>::max(), std::numeric_limits<double>::max(), std::numeric_limits<double>::max());
+		Bmax = -1 * Bmin;
+	};
+	BoundingBox(std::vector<Vector> vertices) {
+		Bmin = Vector(std::numeric_limits<double>::max(), std::numeric_limits<double>::max(), std::numeric_limits<double>::max());
+		Bmax = -1 * Bmin;
+		for (int i = 0; i < vertices.size(); i++) {
+			for (int j = 0; j < 3; j++) {
+				double v = vertices[i][j];
+				if (v < Bmin[j]) Bmin[j] = v;
+				if (v > Bmax[j]) Bmax[j] = v;
+			}
+		}
+	};
+	Vector Bmin;
+	Vector Bmax;
+};
+
+// Class only used in labs 3 and 4
 class TriangleMesh : public Object {
 public:
 	TriangleMesh(const Vector& albedo, bool mirror = false, bool transparent = false) : ::Object(albedo, mirror, transparent) {};
 
+	// first scale and then translate the current object
+	void scale_translate(double s, const Vector& t) {
+		for (int i = 0; i < vertices.size(); i++) {
+			vertices[i] = vertices[i] * s + t;
+		}
+	}
+
+	// read an .obj file
+	void readOBJ(const char* obj) {
+		std::ifstream f(obj);
+		if (!f) return;
+
+		std::map<std::string, int> mtls;
+		int curGroup = -1, maxGroup = -1;
+
+		// OBJ indices are 1-based and can be negative (relative), this normalizes them
+		auto resolveIdx = [](int i, int size) {
+			return i < 0 ? size + i : i - 1;
+		};
+
+		auto setFaceVerts = [&](TriangleIndices& t, int i0, int i1, int i2) {
+			t.vtx[0] = resolveIdx(i0, vertices.size());
+			t.vtx[1] = resolveIdx(i1, vertices.size());
+			t.vtx[2] = resolveIdx(i2, vertices.size());
+		};
+		auto setFaceUVs = [&](TriangleIndices& t, int j0, int j1, int j2) {
+			t.uv[0] = resolveIdx(j0, uvs.size());
+			t.uv[1] = resolveIdx(j1, uvs.size());
+			t.uv[2] = resolveIdx(j2, uvs.size());
+		};
+		auto setFaceNormals = [&](TriangleIndices& t, int k0, int k1, int k2) {
+			t.n[0] = resolveIdx(k0, normals.size());
+			t.n[1] = resolveIdx(k1, normals.size());
+			t.n[2] = resolveIdx(k2, normals.size());
+		};
+
+		std::string line;
+		while (std::getline(f, line)) {
+			// Trim trailing whitespace
+			line.erase(line.find_last_not_of(" \r\t\n") + 1);
+			if (line.empty()) continue;
+
+			const char* s = line.c_str();
+
+			if (line.rfind("usemtl ", 0) == 0) {
+				std::string matname = line.substr(7);
+				auto result = mtls.emplace(matname, maxGroup + 1);
+				if (result.second) {
+					curGroup = ++maxGroup;
+				} else {
+					curGroup = result.first->second;
+				}
+			} else if (line.rfind("vn ", 0) == 0) {
+				Vector v;
+				sscanf(s, "vn %lf %lf %lf", &v[0], &v[1], &v[2]);
+				normals.push_back(v);
+			} else if (line.rfind("vt ", 0) == 0) {
+				Vector v;
+				sscanf(s, "vt %lf %lf", &v[0], &v[1]);
+				uvs.push_back(v);
+			} else if (line.rfind("v ", 0) == 0) {
+				Vector pos, col;
+				if (sscanf(s, "v %lf %lf %lf %lf %lf %lf", &pos[0], &pos[1], &pos[2], &col[0], &col[1], &col[2]) == 6) {
+					for (int i = 0; i < 3; i++) col[i] = std::min(1.0, std::max(0.0, col[i]));
+					vertexcolors.push_back(col);
+				} else {
+					sscanf(s, "v %lf %lf %lf", &pos[0], &pos[1], &pos[2]);
+				}
+				vertices.push_back(pos);
+			}
+			else if (line[0] == 'f') {
+				int i[4], j[4], k[4], offset, nn;
+				const char* cur = s + 1;
+				TriangleIndices t;
+				t.group = curGroup;
+
+				// Try each face format: v/vt/vn, v/vt, v//vn, v
+				if ((nn = sscanf(cur, "%d/%d/%d %d/%d/%d %d/%d/%d%n", &i[0], &j[0], &k[0], &i[1], &j[1], &k[1], &i[2], &j[2], &k[2], &offset)) == 9) {
+					setFaceVerts(t, i[0], i[1], i[2]); 
+					setFaceUVs(t, j[0], j[1], j[2]); 
+					setFaceNormals(t, k[0], k[1], k[2]);
+				} else if ((nn = sscanf(cur, "%d/%d %d/%d %d/%d%n", &i[0], &j[0], &i[1], &j[1], &i[2], &j[2], &offset)) == 6) {
+					setFaceVerts(t, i[0], i[1], i[2]); 
+					setFaceUVs(t, j[0], j[1], j[2]);
+				} else if ((nn = sscanf(cur, "%d//%d %d//%d %d//%d%n", &i[0], &k[0], &i[1], &k[1], &i[2], &k[2], &offset)) == 6) {
+					setFaceVerts(t, i[0], i[1], i[2]); 
+					setFaceNormals(t, k[0], k[1], k[2]);
+				} else if ((nn = sscanf(cur, "%d %d %d%n", &i[0], &i[1], &i[2], &offset)) == 3) {
+					setFaceVerts(t, i[0], i[1], i[2]);
+				}
+				else continue;
+
+				indices.push_back(t);
+				cur += offset;
+
+				// Fan triangulation for polygon faces (4+ vertices)
+				while (*cur && *cur != '\n') {
+					TriangleIndices t2;
+					t2.group = curGroup;
+					if ((nn = sscanf(cur, " %d/%d/%d%n", &i[3], &j[3], &k[3], &offset)) == 3) {
+						setFaceVerts(t2, i[0], i[2], i[3]); 
+						setFaceUVs(t2, j[0], j[2], j[3]); 
+						setFaceNormals(t2, k[0], k[2], k[3]);
+					} else if ((nn = sscanf(cur, " %d/%d%n", &i[3], &j[3], &offset)) == 2) {
+						setFaceVerts(t2, i[0], i[2], i[3]); 
+						setFaceUVs(t2, j[0], j[2], j[3]);
+					} else if ((nn = sscanf(cur, " %d//%d%n", &i[3], &k[3], &offset)) == 2) {
+						setFaceVerts(t2, i[0], i[2], i[3]); 
+						setFaceNormals(t2, k[0], k[2], k[3]);
+					} else if ((nn = sscanf(cur, " %d%n", &i[3], &offset)) == 1) {
+						setFaceVerts(t2, i[0], i[2], i[3]);
+					} else { 
+						cur++; 
+						continue; 
+					}
+
+					indices.push_back(t2);
+					cur += offset;
+					i[2] = i[3]; j[2] = j[3]; k[2] = k[3];
+				}
+			}
+		}
+		box = BoundingBox(vertices);
+	}
+	
+
+	// TODO ray-mesh intersection (labs 3 and 4)
 	bool intersect(const Ray& ray, Vector& P, double& t, Vector& N) const {
-		// TODO (labs 3 and 4)
+		// lab 3 : once done, speed it up by first checking against the mesh bounding box
+		double tmin[3];
+		double tmax[3];
+		for (int i = 0; i < 3; i++) {
+			tmin[i] = (box.Bmin[i] - ray.O[i]) / ray.u[i];
+			tmax[i] = (box.Bmax[i] - ray.O[i]) / ray.u[i];
+			if (tmin[i] > tmax[i]) std::swap(tmin[i], tmax[i]);
+		}
+		double tminmax = std::max(std::max(tmin[0], tmin[1]), tmin[2]);
+		double tmaxmin = std::min(std::min(tmax[0], tmax[1]), tmax[2]);
+		if (tmaxmin < tminmax) return false;
+
+		// lab 3 : for each triangle, compute the ray-triangle intersection with Moller-Trumbore algorithm
+		t = std::numeric_limits<double>::max();
+		Vector P_temp;
+		double t_temp;
+		Vector N_temp;
+		for (int i = 0; i < indices.size(); i++) {
+			Vector A = vertices[indices[i].vtx[0]];
+			Vector B = vertices[indices[i].vtx[1]];
+			Vector C = vertices[indices[i].vtx[2]];
+			// Vector ui(uvs[indices[i].uv[0]], uvs[indices[i].uv[1]], uvs[indices[i].uv[2]]);
+			// Vector ni(normals[indices[i].n[0]], normals[indices[i].n[1]], normals[indices[i].n[2]]);
+			int g = indices[i].group;
+			Vector e1 = B - A;
+			Vector e2 = C - A;
+			Vector N_temp = cross(e1, e2);
+			double beta = dot(e2, cross(A - ray.O, ray.u)) / dot(ray.u, N_temp);
+			double gamma = -1 * dot(e1, cross(A - ray.O, ray.u)) / dot(ray.u, N_temp);
+			double alpha = 1 - beta - gamma;
+			t_temp = dot(A - ray.O, N_temp) / dot(ray.u, N_temp);
+			if (beta < 0 || gamma < 0 || alpha < 0 || beta > 1 || gamma > 1 || alpha > 1 || t_temp < 0 || t_temp > t) continue;
+			t = t_temp;
+			P = ray.O + t * ray.u;
+			N = N_temp.normalized();
+		}
+		return (t != std::numeric_limits<double>::max());
+		// lab 4 : recursively apply the bounding-box test from a BVH datastructure
+
 		return false;
 	}
+
+
+	std::vector<TriangleIndices> indices;
+	std::vector<Vector> vertices;
+	std::vector<Vector> uvs;
+	std::vector<Vector> normals;
+	std::vector<Vector> vertexcolors;
+	BoundingBox box;
 };
 
 
@@ -182,7 +395,7 @@ public:
 		double t;
 		int object_id;
 		if (intersect(ray, P, t, N, object_id)) {
-			double epsilon = 0.00000000001;
+			double epsilon = 1e-4;
 			P = P + epsilon * N;
 			if (objects[object_id]->mirror) {
 				// return getColor in the reflected direction, with recursion_depth+1 (recursively)
@@ -194,6 +407,10 @@ public:
 				// return getColor in the refraction direction, with recursion_depth+1 (recursively)
 				double n1 = 1.003;
 				double n2 = 1.330;
+				if (dot(ray.u, N) > 0) { // ray is inside
+					std::swap(n1, n2);
+					N = -1 * N;
+				}
 				Vector tTT = n1 / n2 * (ray.u - dot(ray.u, N) * N);
 				double tN  = -sqrt(1 - sqr(n1/n2) * (1 - sqr(dot(ray.u, N))));
 				Vector refracted_ray = (tTT + tN * N).normalized();
@@ -207,18 +424,22 @@ public:
 			Vector N_temp = N;
 			int object_id_temp = object_id;
 			Vector shadow_ray = (light_position - P).normalized();
+			bool in_shadow = false;
 			if (intersect(Ray(P, shadow_ray), P_temp, t_temp, N_temp, object_id_temp)) {
-				if ((P_temp - P).norm2() <= (light_position - P).norm2()) return Vector(0, 0, 0);
+				if ((P_temp - P).norm2() <= (light_position - P).norm2()) in_shadow = true;
 			}
 
-			double attenuation 	= light_intensity / (4 * M_PI * (light_position - P).norm2());
-			Vector material 	= objects[object_id]->albedo / M_PI;
-			double solid_angle	= dot(N, (light_position - P).normalized());
-			if (solid_angle < 0) solid_angle = 0;
-			Vector direct = attenuation * material * solid_angle;
+			Vector direct(0, 0, 0);
+			if (!in_shadow) {
+				double attenuation 	= light_intensity / (4 * M_PI * (light_position - P).norm2());
+				Vector material 	= objects[object_id]->albedo / M_PI;
+				double solid_angle	= dot(N, (light_position - P).normalized());
+				if (solid_angle < 0) solid_angle = 0;
+				direct = attenuation * material * solid_angle;
+			}
 
-			// TODO (lab 2) : add indirect lighting component with a recursive call
-			int tid = omp_get_thread_num();
+			// DONE (lab 2) : add indirect lighting component with a recursive call
+			int tid = omp_get_thread_num() % 32;
 			double r1 = uniform(engine[tid]);
 			double r2 = uniform(engine[tid]);
 			double x = cos(2.0 * M_PI * r1) * sqrt(1 - r2);
@@ -226,10 +447,10 @@ public:
 			double z = sqrt(r2);
 
 			Vector T1;
-			double min_val = std::min(std::min(abs(N[0]), abs(N[1])), abs(N[2]));
-			if 		(min_val == abs(N[0])) { T1 = Vector(0, -N[2], N[1]); }
-			else if (min_val == abs(N[1])) { T1 = Vector(N[2], 0, -N[0]); }
-			else if (min_val == abs(N[2])) { T1 = Vector(-N[1], N[0], 0); }
+			double min_val = std::min(std::min(std::abs(N[0]), std::abs(N[1])), std::abs(N[2]));
+			if 		(min_val == std::abs(N[0])) { T1 = Vector(0, -N[2], N[1]); }
+			else if (min_val == std::abs(N[1])) { T1 = Vector(N[2], 0, -N[0]); }
+			else if (min_val == std::abs(N[2])) { T1 = Vector(-N[1], N[0], 0); }
 
 			T1.normalize();
 			Vector T2 = cross(N, T1);
@@ -254,15 +475,16 @@ public:
 
 
 int main() {
-	int W = 512;
-	int H = 512;
+	// TODO: Change values to 512
+	int W = 128;
+	int H = 128;
 
 	for (int i = 0; i<32; i++) {
 		engine[i].seed(i);
 	}
 
 	Sphere center_sphere(Vector(0, 0, 0), 10., Vector(0.8, 0.8, 0.8));
-	center_sphere.transparent = false;
+	center_sphere.mirror = false;
 	Sphere wall_left(Vector(-1000, 0, 0), 940, Vector(0.5, 0.8, 0.1));
 	Sphere wall_right(Vector(1000, 0, 0), 940, Vector(0.9, 0.2, 0.3));
 	Sphere wall_front(Vector(0, 0, -1000), 940, Vector(0.1, 0.6, 0.7));
@@ -270,15 +492,21 @@ int main() {
 	Sphere ceiling(Vector(0, 1000, 0), 940, Vector(0.3, 0.5, 0.3));
 	Sphere floor(Vector(0, -1000, 0), 990, Vector(0.6, 0.5, 0.7));
 
+	TriangleMesh cat(Vector(0.8, 0.8, 0.8));
+	cat.readOBJ("cadnav/cat.obj");
+	cat.scale_translate(0.6, Vector(0, -10, 0));
+
 	Scene scene;
 	scene.camera_center = Vector(0, 0, 55);
 	scene.light_position = Vector(-10,20,40);
-	scene.light_intensity = 3E7;
+	scene.light_intensity = 1E7;
 	scene.fov = 60 * M_PI / 180.;
 	scene.gamma = 2.2;    // DONE (lab 1) : play with gamma ; typically, gamma = 2.2
-	scene.max_light_bounce = 5;
+	// TODO: Change value to 5
+	scene.max_light_bounce = 1;
 
-	scene.addObject(&center_sphere);
+	//scene.addObject(&center_sphere);
+	scene.addObject(&cat);
 
 	scene.addObject(&wall_left);
 	scene.addObject(&wall_right);
@@ -297,20 +525,17 @@ int main() {
 
 			// DONE (lab 1) : correct ray_direction so that it goes through each pixel (j, i)
 			Vector ray_direction(j - W/2 + 0.5, H/2 - i - 0.5, z);
-			ray_direction.normalize();
 
-			Ray ray(scene.camera_center, ray_direction);
-
-			// TODO (lab 2) : add Monte Carlo / averaging of random ray contributions here
-			// TODO (lab 2) : add antialiasing by altering the ray_direction here
+			// DONE (lab 2) : add Monte Carlo / averaging of random ray contributions here
+			// DONE (lab 2) : add antialiasing by altering the ray_direction here
 			int num_rays = 10;
 			double sigma = 0.5;
-			int tid = omp_get_thread_num();
+			int tid = omp_get_thread_num() % 32;
 			for (int k = 0; k < num_rays; k++) {
 				double r1 = uniform(engine[tid]);
 				double r2 = uniform(engine[tid]);
-				double x = j - W/2 + 0.5 + sigma * sqrt(-2.0 * log(r1)) * cos(2.0 * M_PI * r2);
-				double y = H/2 - i - 0.5 + sigma * sqrt(-2.0 * log(r1)) * sin(2.0 * M_PI * r2);
+				double x = ray_direction[0] + sigma * sqrt(-2.0 * log(r1)) * cos(2.0 * M_PI * r2);
+				double y = ray_direction[1] + sigma * sqrt(-2.0 * log(r1)) * sin(2.0 * M_PI * r2);
 				Vector new_direction(x, y, z);
 				new_direction.normalize();
 				Ray new_ray(scene.camera_center, new_direction);
