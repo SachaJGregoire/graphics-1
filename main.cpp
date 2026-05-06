@@ -613,7 +613,7 @@ public:
 
 int main() {
 	// Optional : change scale
-	int scale = 1;
+	int scale = 8;
 	int W = 512 * scale;
 	int H = 512 * scale;
 
@@ -646,6 +646,7 @@ int main() {
 
 	//scene.addObject(&center_sphere);
 	scene.addObject(&cat);
+	cat.mirror = false;
 
 	scene.addObject(&wall_left);
 	scene.addObject(&wall_right);
