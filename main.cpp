@@ -7,6 +7,8 @@
 #include <string>
 #include <fstream>
 #include <iostream>
+#include <list>
+#include <algorithm>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -141,18 +143,17 @@ public:
 	int uv[3];  // indices within the uv coordinates array
 	int n[3];   // indices within the normals array
 	int group;  // face group
+	Vector barycenter;
 };
 
 // Class only used in labs 3 and 4
 class BoundingBox {
 public:
-	BoundingBox() {
-		Bmin = Vector(std::numeric_limits<double>::max(), std::numeric_limits<double>::max(), std::numeric_limits<double>::max());
-		Bmax = -1 * Bmin;
-	};
+	BoundingBox() {};
 	BoundingBox(std::vector<Vector> vertices) {
-		Bmin = Vector(std::numeric_limits<double>::max(), std::numeric_limits<double>::max(), std::numeric_limits<double>::max());
-		Bmax = -1 * Bmin;
+		if (vertices.size() == 0) return;
+		Bmin = Vector(vertices[0][0], vertices[0][1], vertices[0][2]);
+		Bmax = Bmin;
 		for (int i = 0; i < vertices.size(); i++) {
 			for (int j = 0; j < 3; j++) {
 				double v = vertices[i][j];
@@ -161,8 +162,96 @@ public:
 			}
 		}
 	};
+	BoundingBox(std::vector<Vector>::iterator begin, std::vector<Vector>::iterator end) {
+		if (begin == end) return;
+		Bmin = Vector((*begin)[0], (*begin)[1], (*begin)[2]);
+		Bmax = Bmin;
+		for (auto it = begin; it < end; it++) {
+			for (int j = 0; j < 3; j++) {
+				double v = (*it)[j];
+				if (v < Bmin[j]) Bmin[j] = v;
+				if (v > Bmax[j]) Bmax[j] = v;
+			}
+		}
+	};
+	BoundingBox(std::vector<Vector>& vertices, std::vector<TriangleIndices>& indices, int begin, int end) {
+		if (begin == end) return;
+		double inf = std::numeric_limits<double>::infinity();
+		Bmin = Vector(inf, inf, inf);
+		Bmax = Vector(-inf, -inf, -inf);
+		for (int i = begin; i < end; i++) {
+			for (int j = 0; j < 3; j++) {
+				for (int k = 0; k < 3; k++) {
+					double v = vertices[indices[i].vtx[j]][k];
+					if (v < Bmin[k]) Bmin[k] = v;
+					if (v > Bmax[k]) Bmax[k] = v;
+				}
+			}
+		}
+	};
+	bool intersect(const Ray& ray, double& enter_distance) const {
+		double tmin[3];
+		double tmax[3];
+		for (int i = 0; i < 3; i++) {
+			tmin[i] = (Bmin[i] - ray.O[i]) / ray.u[i];
+			tmax[i] = (Bmax[i] - ray.O[i]) / ray.u[i];
+			if (tmin[i] > tmax[i]) std::swap(tmin[i], tmax[i]);
+		}
+		enter_distance = std::max(std::max(tmin[0], tmin[1]), tmin[2]);
+		double exit_distance = std::min(std::min(tmax[0], tmax[1]), tmax[2]);
+		return (exit_distance > enter_distance) && (exit_distance > 0);
+	}
+	bool intersect(const Ray& ray) const {
+		double enter_distance = std::numeric_limits<double>::max();
+		return this->intersect(ray, enter_distance);
+	}
 	Vector Bmin;
 	Vector Bmax;
+};
+class BVH {
+public:
+	BVH() {};
+	BVH(std::vector<Vector>& vertices, std::vector<TriangleIndices>& indices, int begin, int end) {
+		if (begin == end) return;
+		box = BoundingBox(vertices, indices, begin, end);
+		this->begin = begin;
+		this->end = end;
+		Vector diag = Vector(box.Bmax[0] - box.Bmin[0], box.Bmax[1] - box.Bmin[1], box.Bmax[2] - box.Bmin[2]);
+		// Vector middle_diag = box.Bmin + diag * 0.5;
+		int longest_axis = 0;
+		if (diag[1] > diag[longest_axis]) longest_axis = 1;
+		if (diag[2] > diag[longest_axis]) longest_axis = 2;
+		/*
+		int pivot_index = begin;
+		for (int i = begin; i < end; i++) {
+			if (indices[i].barycenter[longest_axis] < middle_diag[longest_axis]) {
+				std::swap(indices[i], indices[pivot_index]);
+				pivot_index++;
+			}
+		}
+		*/
+		// Partition indices according to the median value on the longest axis
+		int middle = begin + (end - begin) / 2;
+		std::nth_element(indices.begin() + begin, indices.begin() + middle, indices.begin() + end,
+			[longest_axis] (TriangleIndices a, TriangleIndices b) {
+				int l = longest_axis;
+				return a.barycenter[l] < b.barycenter[l];
+			});
+		if (middle <= begin || middle >= end - 1 || end - begin < 5) return;
+		left = new BVH(vertices, indices, begin, middle);
+		right = new BVH(vertices, indices, middle, end);
+	};
+	/*
+	~BVH() {
+		if (left) delete left;
+		if (right) delete right;
+	}
+	*/
+	BoundingBox box;
+	int begin;
+	int end;
+	BVH* left = NULL;
+	BVH* right = NULL;
 };
 
 // Class only used in labs 3 and 4
@@ -175,6 +264,14 @@ public:
 		for (int i = 0; i < vertices.size(); i++) {
 			vertices[i] = vertices[i] * s + t;
 		}
+	}
+
+	// creates the bounding box of the object
+	void create_bvh() {
+		for (int i = 0; i < indices.size(); i++) {
+			indices[i].barycenter = (vertices[indices[i].vtx[0]] + vertices[indices[i].vtx[1]] + vertices[indices[i].vtx[2]]) / 3;
+		}
+		bvh = new BVH(vertices, indices, 0, indices.size());
 	}
 
 	// read an .obj file
@@ -292,13 +389,57 @@ public:
 				}
 			}
 		}
-		box = BoundingBox(vertices);
 	}
 	
 
-	// TODO ray-mesh intersection (labs 3 and 4)
+	// Ray-mesh intersection (labs 3 and 4)
+	// DONE (lab 4) : recursively apply the bounding-box test from a BVH datastructure
 	bool intersect(const Ray& ray, Vector& P, double& t, Vector& N) const {
-		// lab 3 : once done, speed it up by first checking against the mesh bounding box
+		if (!bvh->box.intersect(ray)) return false;
+		std::list<BVH*> to_visit;
+		to_visit.push_front(bvh);
+		t = std::numeric_limits<double>::max();
+		double distance = std::numeric_limits<double>::max();
+		while (!to_visit.empty()) {
+			BVH* curr = to_visit.back();
+			to_visit.pop_back();
+			if (curr->left) {
+				if (curr->left->box.intersect(ray, distance)) {
+					if (distance < t) to_visit.push_back(curr->left);
+				}
+				if (curr->right->box.intersect(ray, distance)) {
+					if (distance < t) to_visit.push_back(curr->right);
+				}
+			} else {
+				// test all triangles between curr->begin and curr->end
+				// if an intersection is found, update t if needed
+				for (int i = curr->begin; i < curr->end; i++) {
+					Vector A = vertices[indices[i].vtx[0]];
+					Vector B = vertices[indices[i].vtx[1]];
+					Vector C = vertices[indices[i].vtx[2]];
+					// Vector ui(uvs[indices[i].uv[0]], uvs[indices[i].uv[1]], uvs[indices[i].uv[2]]);
+					// Vector ni(normals[indices[i].n[0]], normals[indices[i].n[1]], normals[indices[i].n[2]]);
+					// int g = indices[i].group;
+					Vector e1 = B - A;
+					Vector e2 = C - A;
+					Vector N_temp = cross(e1, e2);
+					double beta = dot(e2, cross(A - ray.O, ray.u)) / dot(ray.u, N_temp);
+					double gamma = -1 * dot(e1, cross(A - ray.O, ray.u)) / dot(ray.u, N_temp);
+					double alpha = 1 - beta - gamma;
+					double t_temp = dot(A - ray.O, N_temp) / dot(ray.u, N_temp);
+					if (beta < 0 || gamma < 0 || alpha < 0 || beta > 1 || gamma > 1 || alpha > 1 || t_temp < 0 || t_temp > t) continue;
+					t = t_temp;
+					P = ray.O + t_temp * ray.u;
+					//N = N_temp.normalized();
+					// Phong Interpolation
+					N = alpha * normals[indices[i].n[0]] + beta * normals[indices[i].n[1]] + gamma * normals[indices[i].n[2]];
+					N.normalize();
+				}
+			}
+		}
+		return (t != std::numeric_limits<double>::max());
+		/* lab3 code
+		// First check against the mesh bounding box
 		double tmin[3];
 		double tmax[3];
 		for (int i = 0; i < 3; i++) {
@@ -308,36 +449,31 @@ public:
 		}
 		double tminmax = std::max(std::max(tmin[0], tmin[1]), tmin[2]);
 		double tmaxmin = std::min(std::min(tmax[0], tmax[1]), tmax[2]);
-		if (tmaxmin < tminmax) return false;
+		if (tmaxmin < tminmax || tmaxmin < 0) return false;
 
-		// lab 3 : for each triangle, compute the ray-triangle intersection with Moller-Trumbore algorithm
+		// For each triangle, compute the ray-triangle intersection with Moller-Trumbore algorithm
 		t = std::numeric_limits<double>::max();
-		Vector P_temp;
-		double t_temp;
-		Vector N_temp;
 		for (int i = 0; i < indices.size(); i++) {
 			Vector A = vertices[indices[i].vtx[0]];
 			Vector B = vertices[indices[i].vtx[1]];
 			Vector C = vertices[indices[i].vtx[2]];
 			// Vector ui(uvs[indices[i].uv[0]], uvs[indices[i].uv[1]], uvs[indices[i].uv[2]]);
 			// Vector ni(normals[indices[i].n[0]], normals[indices[i].n[1]], normals[indices[i].n[2]]);
-			int g = indices[i].group;
+			// int g = indices[i].group;
 			Vector e1 = B - A;
 			Vector e2 = C - A;
 			Vector N_temp = cross(e1, e2);
 			double beta = dot(e2, cross(A - ray.O, ray.u)) / dot(ray.u, N_temp);
 			double gamma = -1 * dot(e1, cross(A - ray.O, ray.u)) / dot(ray.u, N_temp);
 			double alpha = 1 - beta - gamma;
-			t_temp = dot(A - ray.O, N_temp) / dot(ray.u, N_temp);
+			double t_temp = dot(A - ray.O, N_temp) / dot(ray.u, N_temp);
 			if (beta < 0 || gamma < 0 || alpha < 0 || beta > 1 || gamma > 1 || alpha > 1 || t_temp < 0 || t_temp > t) continue;
 			t = t_temp;
 			P = ray.O + t * ray.u;
 			N = N_temp.normalized();
 		}
 		return (t != std::numeric_limits<double>::max());
-		// lab 4 : recursively apply the bounding-box test from a BVH datastructure
-
-		return false;
+		*/
 	}
 
 
@@ -346,7 +482,7 @@ public:
 	std::vector<Vector> uvs;
 	std::vector<Vector> normals;
 	std::vector<Vector> vertexcolors;
-	BoundingBox box;
+	BVH* bvh;
 };
 
 
@@ -403,13 +539,14 @@ public:
 				return getColor(Ray(P, reflected_ray), recursion_depth + 1);
 			} // else
 
-			if (objects[object_id]->transparent) { // TODO: fix (optional)
+			if (objects[object_id]->transparent) { // Optional : fix (not working)
 				// return getColor in the refraction direction, with recursion_depth+1 (recursively)
 				double n1 = 1.003;
 				double n2 = 1.330;
 				if (dot(ray.u, N) > 0) { // ray is inside
 					std::swap(n1, n2);
 					N = -1 * N;
+					P = P + 2 * epsilon * N;
 				}
 				Vector tTT = n1 / n2 * (ray.u - dot(ray.u, N) * N);
 				double tN  = -sqrt(1 - sqr(n1/n2) * (1 - sqr(dot(ray.u, N))));
@@ -475,9 +612,10 @@ public:
 
 
 int main() {
-	// TODO: Change values to 512
-	int W = 128;
-	int H = 128;
+	// Optional : change scale
+	int scale = 1;
+	int W = 512 * scale;
+	int H = 512 * scale;
 
 	for (int i = 0; i<32; i++) {
 		engine[i].seed(i);
@@ -495,6 +633,7 @@ int main() {
 	TriangleMesh cat(Vector(0.8, 0.8, 0.8));
 	cat.readOBJ("cadnav/cat.obj");
 	cat.scale_translate(0.6, Vector(0, -10, 0));
+	cat.create_bvh();
 
 	Scene scene;
 	scene.camera_center = Vector(0, 0, 55);
@@ -502,8 +641,8 @@ int main() {
 	scene.light_intensity = 1E7;
 	scene.fov = 60 * M_PI / 180.;
 	scene.gamma = 2.2;    // DONE (lab 1) : play with gamma ; typically, gamma = 2.2
-	// TODO: Change value to 5
-	scene.max_light_bounce = 1;
+	// Optional : change value
+	scene.max_light_bounce = 5;
 
 	//scene.addObject(&center_sphere);
 	scene.addObject(&cat);
@@ -528,10 +667,11 @@ int main() {
 
 			// DONE (lab 2) : add Monte Carlo / averaging of random ray contributions here
 			// DONE (lab 2) : add antialiasing by altering the ray_direction here
-			int num_rays = 10;
-			double sigma = 0.5;
+			// Optional : change spp or sigma
+			int spp = 32;
+			double sigma = 0.3;
 			int tid = omp_get_thread_num() % 32;
-			for (int k = 0; k < num_rays; k++) {
+			for (int k = 0; k < spp; k++) {
 				double r1 = uniform(engine[tid]);
 				double r2 = uniform(engine[tid]);
 				double x = ray_direction[0] + sigma * sqrt(-2.0 * log(r1)) * cos(2.0 * M_PI * r2);
@@ -541,9 +681,9 @@ int main() {
 				Ray new_ray(scene.camera_center, new_direction);
 				color = color + scene.getColor(new_ray, 0);
 			}
-			color = color / num_rays;
+			color = color / spp;
 
-			// TODO (lab 2) : add depth of field effect by altering the ray origin (and direction) here (optional)
+			// Optional (lab 2) : add depth of field effect by altering the ray origin (and direction) here
 
 
 			image[(i * W + j) * 3 + 0] = std::min(255., std::max(0., 255. * std::pow(color[0] / 255., 1. / scene.gamma)));
